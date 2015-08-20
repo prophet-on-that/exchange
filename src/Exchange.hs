@@ -15,6 +15,7 @@ import Data.Time
 import TH_Utils
 import Control.Monad
 import Data.Foldable
+import Data.Maybe
 
 type Price = Integer
 
@@ -72,12 +73,11 @@ addBids bids' exch = do
           = min (view maximumPrice bid) bestOffer'
             
         alter :: Maybe Quotes -> STM (Maybe Quotes)
-        alter Nothing 
-          = return . Just $ emptyQuotes
-              & ( bids %~ (bid :) )
-        alter (Just quotes)
-          = return . Just $ quotes 
-              & ( bids %~ (++ [bid]) )
+        alter
+          = return . Just . modQuotes . fromMaybe emptyQuotes
+          where
+            modQuotes
+              = bids %~ (bid :)
             
       Map.focus (Focus.alterM alter) bidPrice (view book exch)
       return $ max (Just bidPrice) highestBid
@@ -108,12 +108,11 @@ addOffers offers' exch = do
           = max (view minimumPrice offer) bestBid'
             
         alter :: Maybe Quotes -> STM (Maybe Quotes)
-        alter Nothing 
-          = return . Just $ emptyQuotes
-              & ( offers %~ (offer :) )
-        alter (Just quotes)
-          = return . Just $ quotes 
-              & ( offers %~ (offer :) )
+        alter 
+          = return . Just . modQuotes . fromMaybe emptyQuotes
+          where
+            modQuotes
+              = offers %~ (offer :)
             
       Map.focus (Focus.alterM alter) offerPrice (view book exch)
       case lowestOffer of
@@ -132,38 +131,3 @@ addOffers offers' exch = do
       bestOffer' <- readTVar $ view bestOffer exch
       when (lowestOffer' < bestOffer') $
         writeTVar (view bestOffer exch) lowestOffer'
-
--- -- | Install a bid into the book. Bids will never exceed the best offer.
--- bid
---   :: Quote
---   -> Price -- ^ The maximum price the buyer is willing to meet. 
---   -> Exchange
---   -> STM ()
--- bid quote price exch 
---   = Map.focus (Focus.alterM alter) price (view book exch)
---   where
---     alter :: Maybe Quotes -> STM (Maybe Quotes)
---     alter Nothing 
---       = return . Just $ emptyQuotes
---           & ( bids %~ (quote :) )
---     alter (Just quotes)
---       = return . Just $ quotes 
---           & ( bids %~ (++ [quote]) )
-  
--- -- | Install an offer into the book.
--- offer
---   :: Quote
---   -> Price
---   -> Exchange
---   -> STM ()
--- offer quote price exch 
---   = Map.focus (Focus.alterM alter) price (view book exch)
---   where
---     alter :: Maybe Quotes -> STM (Maybe Quotes)
---     alter Nothing 
---       = return . Just $ emptyQuotes
---           & ( offers %~ (quote :) )
---     alter (Just quotes)
---       = return . Just $ quotes 
---           & ( offers %~ (++ [quote]) )
-  
