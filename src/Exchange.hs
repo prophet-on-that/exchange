@@ -16,6 +16,9 @@ import TH_Utils
 import Control.Monad
 import Data.Foldable
 import Data.Maybe
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Ord
 
 type Price = Integer
 
@@ -26,8 +29,12 @@ declareLensesWith unprefixedFields [d|
     , quantity :: !Integer
     , maximumPrice :: !Price
     , timestamp :: {-# UNPACK #-} !UTCTime
-    }
+    } deriving (Eq)
   |]
+
+instance Ord Bid where
+  compare
+    = comparing (view bidId)
 
 declareLensesWith unprefixedFields [d|
   data Offer = Offer
@@ -36,19 +43,23 @@ declareLensesWith unprefixedFields [d|
     , quantity :: !Integer
     , minimumPrice :: !Price
     , timestamp :: {-# UNPACK #-} !UTCTime
-    }
+    } deriving (Eq)
   |]
+
+instance Ord Offer where
+  compare
+    = comparing (view offerId)
 
 declareLensesWith unprefixedFields [d|
   data Quotes = Quotes
-    { bids :: ![Bid]
-    , offers :: ![Offer]
+    { bids :: !(Set Bid)
+    , offers :: !(Set Offer)
     } 
   |]
  
 emptyQuotes :: Quotes
 emptyQuotes
-  = Quotes [] []
+  = Quotes Set.empty Set.empty
 
 declareLensesWith unprefixedFields [d|
   data Exchange = Exchange
@@ -77,7 +88,7 @@ addBids bids' exch = do
           = return . Just . modQuotes . fromMaybe emptyQuotes
           where
             modQuotes
-              = bids %~ (bid :)
+              = bids %~ Set.insert bid
             
       Map.focus (Focus.alterM alter) bidPrice (view book exch)
       return $ max (Just bidPrice) highestBid
@@ -112,7 +123,7 @@ addOffers offers' exch = do
           = return . Just . modQuotes . fromMaybe emptyQuotes
           where
             modQuotes
-              = offers %~ (offer :)
+              = offers %~ Set.insert offer
             
       Map.focus (Focus.alterM alter) offerPrice (view book exch)
       case lowestOffer of
