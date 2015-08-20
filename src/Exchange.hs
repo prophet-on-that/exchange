@@ -93,6 +93,46 @@ addBids bids' exch = do
       when (highestBid' > bestBid') $
         writeTVar (view bestBid exch) highestBid'
 
+-- | Install 'Offer's into the book. 
+addOffers
+  :: [Offer]
+  -> Exchange
+  -> STM ()
+addOffers offers' exch = do
+  bestBid' <- readTVar $ view bestBid exch
+  let
+    updateMap :: Maybe Price -> Offer -> STM (Maybe Price)
+    updateMap lowestOffer offer = do
+      let
+        offerPrice
+          = max (view minimumPrice offer) bestBid'
+            
+        alter :: Maybe Quotes -> STM (Maybe Quotes)
+        alter Nothing 
+          = return . Just $ emptyQuotes
+              & ( offers %~ (offer :) )
+        alter (Just quotes)
+          = return . Just $ quotes 
+              & ( offers %~ (offer :) )
+            
+      Map.focus (Focus.alterM alter) offerPrice (view book exch)
+      case lowestOffer of
+        Nothing ->
+          return $ Just offerPrice
+        (Just lowestOffer') ->
+          return . Just $ min offerPrice lowestOffer'
+      
+  lowestOffer <- foldlM updateMap Nothing offers'
+
+  -- Update stored best offer.
+  case lowestOffer of
+    Nothing ->
+      return ()
+    Just lowestOffer' -> do
+      bestOffer' <- readTVar $ view bestOffer exch
+      when (lowestOffer' < bestOffer') $
+        writeTVar (view bestOffer exch) lowestOffer'
+
 -- -- | Install a bid into the book. Bids will never exceed the best offer.
 -- bid
 --   :: Quote
