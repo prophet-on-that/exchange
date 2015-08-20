@@ -1,4 +1,7 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Exchange where
 
@@ -7,67 +10,82 @@ import qualified STMContainers.Map as Map
 import qualified Focus
 import Control.Concurrent.STM
 import Control.Lens
+import Data.Time
+import TH_Utils
+import Data.Ord
 
 type Price = Integer
 
-data Quote = Quote
-  { _clientId :: !Integer
-  , _offerId :: !Integer
-  , _count :: !Integer
-  }
+declareLensesWith unprefixedFields [d|
+  data Bid = Bid
+    { clientRef :: !Integer
+    , bidId :: !Integer
+    , quantity :: !Integer
+    , maximumPrice :: !Integer
+    , timestamp :: {-# UNPACK #-} !UTCTime
+    }
+  |]
 
-makeLenses ''Quote
+declareLensesWith unprefixedFields [d|
+  data Offer = Offer
+    { clientRef :: !Integer
+    , offerId :: !Integer
+    , quantity :: !Integer
+    , minimumPrice :: !Integer
+    , timestamp :: {-# UNPACK #-} !UTCTime
+    }
+  |]
 
-data Quotes = Quotes
-  { _bids :: ![Quote]
-  , _offers :: ![Quote]
-  } 
-
-makeLenses ''Quotes
+declareLensesWith unprefixedFields [d|
+  data Quotes = Quotes
+    { bids :: ![Bid]
+    , offers :: ![Offer]
+    } 
+  |]
 
 emptyQuotes :: Quotes
 emptyQuotes
   = Quotes [] []
 
-data Exchange = Exchange
-  { _book :: Map Price Quotes
-  , _bestBid :: TVar Price -- ^ The best bid is derived from the book, we store it here to avoid needless recomputation.
-  , _bestOffer :: TVar Price -- ^ The best offer is derived from the book, we store it here to avoid needless recomputation.
-  }
+declareLensesWith unprefixedFields [d|
+  data Exchange = Exchange
+    { book :: Map Price Quotes
+    , bestBid :: TVar Price -- ^ The best bid is derived from the book, we store it here to avoid needless recomputation.
+    , bestOffer :: TVar Price -- ^ The best offer is derived from the book, we store it here to avoid needless recomputation.
+    }
+  |]
 
-makeLenses ''Exchange
-
--- | Install a bid into the book. Bids will never exceed the best offer.
-bid
-  :: Quote
-  -> Price -- ^ The maximum price the buyer is willing to meet. 
-  -> Exchange
-  -> STM ()
-bid quote price exch 
-  = Map.focus (Focus.alterM alter) price (view book exch)
-  where
-    alter :: Maybe Quotes -> STM (Maybe Quotes)
-    alter Nothing 
-      = return . Just $ emptyQuotes
-          & ( bids %~ (quote :) )
-    alter (Just quotes)
-      = return . Just $ quotes 
-          & ( bids %~ (++ [quote]) )
+-- -- | Install a bid into the book. Bids will never exceed the best offer.
+-- bid
+--   :: Quote
+--   -> Price -- ^ The maximum price the buyer is willing to meet. 
+--   -> Exchange
+--   -> STM ()
+-- bid quote price exch 
+--   = Map.focus (Focus.alterM alter) price (view book exch)
+--   where
+--     alter :: Maybe Quotes -> STM (Maybe Quotes)
+--     alter Nothing 
+--       = return . Just $ emptyQuotes
+--           & ( bids %~ (quote :) )
+--     alter (Just quotes)
+--       = return . Just $ quotes 
+--           & ( bids %~ (++ [quote]) )
   
--- | Install an offer into the book.
-offer
-  :: Quote
-  -> Price
-  -> Exchange
-  -> STM ()
-offer quote price exch 
-  = Map.focus (Focus.alterM alter) price (view book exch)
-  where
-    alter :: Maybe Quotes -> STM (Maybe Quotes)
-    alter Nothing 
-      = return . Just $ emptyQuotes
-          & ( offers %~ (quote :) )
-    alter (Just quotes)
-      = return . Just $ quotes 
-          & ( offers %~ (++ [quote]) )
+-- -- | Install an offer into the book.
+-- offer
+--   :: Quote
+--   -> Price
+--   -> Exchange
+--   -> STM ()
+-- offer quote price exch 
+--   = Map.focus (Focus.alterM alter) price (view book exch)
+--   where
+--     alter :: Maybe Quotes -> STM (Maybe Quotes)
+--     alter Nothing 
+--       = return . Just $ emptyQuotes
+--           & ( offers %~ (quote :) )
+--     alter (Just quotes)
+--       = return . Just $ quotes 
+--           & ( offers %~ (++ [quote]) )
   
