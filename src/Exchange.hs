@@ -2,6 +2,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Exchange where
 
@@ -12,7 +13,8 @@ import Control.Concurrent.STM
 import Control.Lens
 import Data.Time
 import TH_Utils
-import Data.Ord
+import Control.Monad
+import Data.Foldable
 
 type Price = Integer
 
@@ -21,7 +23,7 @@ declareLensesWith unprefixedFields [d|
     { clientRef :: !Integer
     , bidId :: !Integer
     , quantity :: !Integer
-    , maximumPrice :: !Integer
+    , maximumPrice :: !Price
     , timestamp :: {-# UNPACK #-} !UTCTime
     }
   |]
@@ -31,7 +33,7 @@ declareLensesWith unprefixedFields [d|
     { clientRef :: !Integer
     , offerId :: !Integer
     , quantity :: !Integer
-    , minimumPrice :: !Integer
+    , minimumPrice :: !Price
     , timestamp :: {-# UNPACK #-} !UTCTime
     }
   |]
@@ -42,7 +44,7 @@ declareLensesWith unprefixedFields [d|
     , offers :: ![Offer]
     } 
   |]
-
+ 
 emptyQuotes :: Quotes
 emptyQuotes
   = Quotes [] []
@@ -54,6 +56,42 @@ declareLensesWith unprefixedFields [d|
     , bestOffer :: TVar Price -- ^ The best offer is derived from the book, we store it here to avoid needless recomputation.
     }
   |]
+
+-- | Install 'Bid's into the book. 
+addBids
+  :: [Bid]
+  -> Exchange
+  -> STM ()
+addBids bids' exch = do
+  bestOffer' <- readTVar $ view bestOffer exch
+  let
+    updateMap :: Maybe Price -> Bid -> STM (Maybe Price)
+    updateMap highestBid bid = do
+      let
+        bidPrice
+          = min (view maximumPrice bid) bestOffer'
+            
+        alter :: Maybe Quotes -> STM (Maybe Quotes)
+        alter Nothing 
+          = return . Just $ emptyQuotes
+              & ( bids %~ (bid :) )
+        alter (Just quotes)
+          = return . Just $ quotes 
+              & ( bids %~ (++ [bid]) )
+            
+      Map.focus (Focus.alterM alter) bidPrice (view book exch)
+      return $ max (Just bidPrice) highestBid
+      
+  highestBid <- foldlM updateMap Nothing bids'
+
+  -- Update stored best bid.
+  case highestBid of
+    Nothing ->
+      return ()
+    Just highestBid' -> do
+      bestBid' <- readTVar $ view bestBid exch
+      when (highestBid' > bestBid') $
+        writeTVar (view bestBid exch) highestBid'
 
 -- -- | Install a bid into the book. Bids will never exceed the best offer.
 -- bid
