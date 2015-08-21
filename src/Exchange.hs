@@ -10,7 +10,8 @@ module Exchange where
 import STMContainers.Map (Map)
 import qualified STMContainers.Map as Map
 import qualified Focus
-import Control.Concurrent.STM
+import Control.Concurrent.STM (STM, TVar)
+import qualified Control.Concurrent.STM as STM
 import Control.Lens
 import Data.Time
 import TH_Utils
@@ -24,6 +25,20 @@ import Data.List (sortBy)
 import Control.Monad.Catch
 import qualified Data.Text as T
 import Data.Typeable
+import Control.Monad.Reader
+import Control.Monad.Base
+
+-- STM primitives --
+
+readTVar :: MonadBase STM m => TVar a -> m a
+readTVar
+  = liftBase . STM.readTVar
+
+writeTVar :: MonadBase STM m => TVar a -> a -> m ()
+writeTVar tVar a
+  = liftBase $ STM.writeTVar tVar a
+
+-- Implementation proper --
 
 type Price = Integer
 
@@ -77,15 +92,18 @@ declareLensesWith unprefixedFields [d|
     }
   |]
 
--- | Install 'Bid's into the book. 
+type ExchangeOp m r = ReaderT Exchange m r
+
+-- | Install 'Bid's into the book. __Note__: you should always
+-- 'resolve' before executing the STM action after using this
+-- function.
 addBids
   :: [Bid]
-  -> Exchange
-  -> STM ()
-addBids bids' exch = do
-  bestOffer' <- readTVar $ view bestOffer exch
+  -> ExchangeOp STM ()
+addBids bids' = do
+  bestOffer' <- view bestOffer >>= readTVar
   let
-    updateMap :: Maybe Price -> Bid -> STM (Maybe Price)
+    updateMap :: Maybe Price -> Bid -> ExchangeOp STM (Maybe Price)
     updateMap highestBid bid = do
       let
         bidPrice
@@ -101,8 +119,9 @@ addBids bids' exch = do
           where
             modQuotes
               = bids %~ Set.insert bid
-            
-      Map.focus (Focus.alterM alter) bidPrice (view book exch)
+
+      book' <- view book
+      liftBase $ Map.focus (Focus.alterM alter) bidPrice book'
       return $ max (Just bidPrice) highestBid
       
   highestBid <- foldlM updateMap Nothing bids'
@@ -112,23 +131,24 @@ addBids bids' exch = do
     Nothing ->
       return ()
     Just highestBid' -> do
-      bestBid' <- readTVar $ view bestBid exch
+      bestBid' <- view bestBid >>= readTVar
       case bestBid' of
         Nothing ->
-          writeTVar (view bestBid exch) $ Just highestBid'
+          view bestBid >>= flip writeTVar (Just highestBid')
         Just bestBid'' -> 
           when (highestBid' > bestBid'') $
-            writeTVar (view bestBid exch) $ Just highestBid'
+            view bestBid >>= flip writeTVar (Just highestBid')
 
--- | Install 'Offer's into the book. 
+-- | Install 'Offer's into the book. __Note__: you should always
+-- 'resolve' before executing the STM action after using this
+-- function.
 addOffers
   :: [Offer]
-  -> Exchange
-  -> STM ()
-addOffers offers' exch = do
-  bestBid' <- readTVar $ view bestBid exch
+  -> ExchangeOp STM ()
+addOffers offers' = do
+  bestBid' <- view bestBid >>= readTVar
   let
-    updateMap :: Maybe Price -> Offer -> STM (Maybe Price)
+    updateMap :: Maybe Price -> Offer -> ExchangeOp STM (Maybe Price)
     updateMap lowestOffer offer = do
       let
         offerPrice
@@ -144,8 +164,9 @@ addOffers offers' exch = do
           where
             modQuotes
               = offers %~ Set.insert offer
-            
-      Map.focus (Focus.alterM alter) offerPrice (view book exch)
+
+      book' <- view book
+      liftBase $ Map.focus (Focus.alterM alter) offerPrice book'
       case lowestOffer of
         Nothing ->
           return $ Just offerPrice
@@ -159,13 +180,13 @@ addOffers offers' exch = do
     Nothing ->
       return ()
     Just lowestOffer' -> do
-      bestOffer' <- readTVar $ view bestOffer exch
+      bestOffer' <- view bestOffer >>= readTVar
       case bestOffer' of
         Nothing ->
-          writeTVar (view bestOffer exch) $ Just lowestOffer'
+          view bestOffer >>= flip writeTVar (Just lowestOffer')
         Just bestOffer'' -> 
           when (lowestOffer' < bestOffer'') $
-            writeTVar (view bestOffer exch) $ Just lowestOffer'
+            view bestOffer >>= flip writeTVar (Just lowestOffer')
 
 declareLensesWith unprefixedFields [d|
   data Transaction = Transaction
@@ -182,10 +203,10 @@ data ExchangeException
 
 instance Exception ExchangeException
 
-resolve :: Exchange -> STM [Transaction]
-resolve exch = do
-  bestBid' <- readTVar $ view bestBid exch
-  bestOffer' <- readTVar $ view bestOffer exch
+resolve :: ExchangeOp STM [Transaction]
+resolve = do
+  bestBid' <- view bestBid >>= readTVar
+  bestOffer' <- view bestOffer >>= readTVar
   let
     tradePrice = do
       bestBid'' <- bestBid'
@@ -197,7 +218,7 @@ resolve exch = do
     Nothing ->
       return []
     Just tradePrice' -> do
-      quotes <- Map.focus lookupAndDelete tradePrice' (view book exch)
+      quotes <- view book >>= liftBase . Map.focus lookupAndDelete tradePrice'
       case quotes of
         Nothing ->
           throwM $ InconsistentState "resolve: book lookup at tradePrice yielded Nothing"
@@ -214,13 +235,13 @@ resolve exch = do
               return transactions
               
             (remainingBids', []) -> do
-              addBids remainingBids' exch
-              transactions' <- resolve exch
+              addBids remainingBids' 
+              transactions' <- resolve 
               return $ transactions ++ transactions'
               
             ([], remainingOffers') -> do
-              addOffers remainingOffers' exch
-              transactions' <- resolve exch
+              addOffers remainingOffers' 
+              transactions' <- resolve 
               return $ transactions ++ transactions'
 
             _ ->
