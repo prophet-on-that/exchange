@@ -3,6 +3,7 @@
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Exchange where
 
@@ -19,6 +20,10 @@ import Data.Maybe
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Ord
+import Data.List (sortBy)
+import Control.Monad.Catch
+import qualified Data.Text as T
+import Data.Typeable
 
 type Price = Integer
 
@@ -27,7 +32,7 @@ newtype Id = Id Integer
 
 declareLensesWith unprefixedFields [d|
   data Bid = Bid
-    { clientRef :: !Integer
+    { clientRef :: !Id
     , bidId :: !Id
     , quantity :: !Integer
     , maximumPrice :: !Price
@@ -41,7 +46,7 @@ instance Ord Bid where
 
 declareLensesWith unprefixedFields [d|
   data Offer = Offer
-    { clientRef :: !Integer
+    { clientRef :: !Id
     , offerId :: !Id
     , quantity :: !Integer
     , minimumPrice :: !Price
@@ -164,18 +169,96 @@ addOffers offers' exch = do
 
 declareLensesWith unprefixedFields [d|
   data Transaction = Transaction
-    { buyerId :: Id
-    , sellerId :: Id
+    { buyerRef :: Id
+    , sellerRef :: Id
     , quantity :: Integer
     , price :: Price
     }
   |]
 
+data ExchangeException
+  = InconsistentState T.Text
+  deriving (Show, Typeable)
+
+instance Exception ExchangeException
+
 resolve :: Exchange -> STM [Transaction]
 resolve exch = do
-  undefined
-  -- bestBid' <- readTVar $ view bestBid exch
-  -- bestOffer' <- readTVar $ view bestOffer exch
+  bestBid' <- readTVar $ view bestBid exch
+  bestOffer' <- readTVar $ view bestOffer exch
+  let
+    tradePrice = do
+      bestBid'' <- bestBid'
+      bestOffer'' <- bestOffer'
+      guard $ bestBid'' == bestOffer''
+      return bestBid''
+        
+  case tradePrice of
+    Nothing ->
+      return []
+    Just tradePrice' -> do
+      quotes <- Map.lookup tradePrice' (view book exch)
+      case quotes of
+        Nothing ->
+          throwM $ InconsistentState "resolve: book lookup at tradePrice yielded Nothing"
+        Just quotes' -> do
+          let
+            bids'
+              = sortBy (comparing $ Down . view timestamp) . Set.toList . view bids $ quotes'
+            offers'
+              = sortBy (comparing $ Down . view timestamp) . Set.toList . view offers $ quotes'
+            (transactions, remainingBids, remainingOffer)
+              = resolve' tradePrice' bids' offers'
+          undefined
+  where
+    -- Post: null bids || null offers
+    resolve' :: Price -> [Bid] -> [Offer] -> ([Transaction], [Bid], [Offer])
+    resolve' tradePrice bids' offers' 
+      = (reverse transactions, remainingBids, remainingOffers)
+      where
+        (transactions, remainingBids, remainingOffers)
+          = helper [] bids' offers'
+            
+        helper :: [Transaction] -> [Bid] -> [Offer] -> ([Transaction], [Bid], [Offer])
+        helper transactions (bid : bids') (offer : offers')
+          | bidQuantity == offerQuantity
+              = let
+                  newTransaction
+                    = Transaction buyerRef' sellerRef' bidQuantity tradePrice
+                in
+                  (newTransaction : transactions, bids', offers')
+          | bidQuantity > offerQuantity
+              = let
+                  newTransaction
+                    = Transaction buyerRef' sellerRef' offerQuantity tradePrice
+                  updatedBid
+                    = bid
+                        & ( quantity -~ offerQuantity )
+                in
+                  (newTransaction : transactions, updatedBid : bids', offers')
+          | otherwise 
+              = let
+                  newTransaction
+                    = Transaction buyerRef' sellerRef' bidQuantity tradePrice
+                  updatedOffer
+                    = offer
+                        & ( quantity -~ bidQuantity )
+                in
+                  (newTransaction : transactions, bids', updatedOffer : offers')
+          where
+            bidQuantity
+              = view quantity bid
+            offerQuantity
+              = view quantity offer
+            buyerRef'
+              = view clientRef bid
+            sellerRef'
+              = view clientRef offer
+
+        helper transactions bids' offers'
+          = (transactions, bids', offers')
+            
+    
   -- let
   --   book'
   --     = view book exch
