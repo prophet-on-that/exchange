@@ -197,7 +197,7 @@ resolve exch = do
     Nothing ->
       return []
     Just tradePrice' -> do
-      quotes <- Map.lookup tradePrice' (view book exch)
+      quotes <- Map.focus lookupAndDelete tradePrice' (view book exch)
       case quotes of
         Nothing ->
           throwM $ InconsistentState "resolve: book lookup at tradePrice yielded Nothing"
@@ -207,10 +207,31 @@ resolve exch = do
               = sortBy (comparing $ Down . view timestamp) . Set.toList . view bids $ quotes'
             offers'
               = sortBy (comparing $ Down . view timestamp) . Set.toList . view offers $ quotes'
-            (transactions, remainingBids, remainingOffer)
+            (transactions, remainingBids, remainingOffers)
               = resolve' tradePrice' bids' offers'
-          undefined
+          case (remainingBids, remainingOffers) of
+            ([], []) ->
+              return transactions
+              
+            (remainingBids', []) -> do
+              addBids remainingBids' exch
+              transactions' <- resolve exch
+              return $ transactions ++ transactions'
+              
+            ([], remainingOffers') -> do
+              addOffers remainingOffers' exch
+              transactions' <- resolve exch
+              return $ transactions ++ transactions'
+
+            _ ->
+              throwM $ InconsistentState "resolve: bids and offers both non-exhausted"
   where
+    lookupAndDelete :: Focus.StrategyM STM Quotes (Maybe Quotes)
+    lookupAndDelete Nothing
+      = return $ (Nothing, Focus.Keep)
+    lookupAndDelete (Just quotes)
+      = return $ (Just quotes, Focus.Remove)
+    
     -- Post: null bids || null offers
     resolve' :: Price -> [Bid] -> [Offer] -> ([Transaction], [Bid], [Offer])
     resolve' tradePrice bids' offers' 
@@ -258,13 +279,3 @@ resolve exch = do
         helper transactions bids' offers'
           = (transactions, bids', offers')
             
-    
-  -- let
-  --   book'
-  --     = view book exch
-  -- if bestBid' == bestOffer'
-  --   then do
-  --     quotes <- Map.lookup bestBid' book'
-  --     undefined
-  --   else
-  --     return []
