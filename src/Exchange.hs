@@ -22,10 +22,13 @@ import Data.Ord
 
 type Price = Integer
 
+newtype Id = Id Integer
+  deriving (Eq, Ord, Show)
+
 declareLensesWith unprefixedFields [d|
   data Bid = Bid
     { clientRef :: !Integer
-    , bidId :: !Integer
+    , bidId :: !Id
     , quantity :: !Integer
     , maximumPrice :: !Price
     , timestamp :: {-# UNPACK #-} !UTCTime
@@ -39,7 +42,7 @@ instance Ord Bid where
 declareLensesWith unprefixedFields [d|
   data Offer = Offer
     { clientRef :: !Integer
-    , offerId :: !Integer
+    , offerId :: !Id
     , quantity :: !Integer
     , minimumPrice :: !Price
     , timestamp :: {-# UNPACK #-} !UTCTime
@@ -64,8 +67,8 @@ emptyQuotes
 declareLensesWith unprefixedFields [d|
   data Exchange = Exchange
     { book :: Map Price Quotes
-    , bestBid :: TVar Price -- ^ The best bid is derived from the book, we store it here to avoid needless recomputation.
-    , bestOffer :: TVar Price -- ^ The best offer is derived from the book, we store it here to avoid needless recomputation.
+    , bestBid :: TVar (Maybe Price) -- ^ The best bid is derived from the book, we store it here to avoid needless recomputation.
+    , bestOffer :: TVar (Maybe Price) -- ^ The best offer is derived from the book, we store it here to avoid needless recomputation.
     }
   |]
 
@@ -81,7 +84,11 @@ addBids bids' exch = do
     updateMap highestBid bid = do
       let
         bidPrice
-          = min (view maximumPrice bid) bestOffer'
+          = case bestOffer' of
+              Nothing ->
+                view maximumPrice bid
+              Just bestOffer'' ->
+                min (view maximumPrice bid) bestOffer''
             
         alter :: Maybe Quotes -> STM (Maybe Quotes)
         alter
@@ -101,8 +108,12 @@ addBids bids' exch = do
       return ()
     Just highestBid' -> do
       bestBid' <- readTVar $ view bestBid exch
-      when (highestBid' > bestBid') $
-        writeTVar (view bestBid exch) highestBid'
+      case bestBid' of
+        Nothing ->
+          writeTVar (view bestBid exch) $ Just highestBid'
+        Just bestBid'' -> 
+          when (highestBid' > bestBid'') $
+            writeTVar (view bestBid exch) $ Just highestBid'
 
 -- | Install 'Offer's into the book. 
 addOffers
@@ -116,7 +127,11 @@ addOffers offers' exch = do
     updateMap lowestOffer offer = do
       let
         offerPrice
-          = max (view minimumPrice offer) bestBid'
+          = case bestBid' of
+              Nothing ->
+                view minimumPrice offer
+              Just bestBid'' -> 
+                max (view minimumPrice offer) bestBid''
             
         alter :: Maybe Quotes -> STM (Maybe Quotes)
         alter 
@@ -140,5 +155,33 @@ addOffers offers' exch = do
       return ()
     Just lowestOffer' -> do
       bestOffer' <- readTVar $ view bestOffer exch
-      when (lowestOffer' < bestOffer') $
-        writeTVar (view bestOffer exch) lowestOffer'
+      case bestOffer' of
+        Nothing ->
+          writeTVar (view bestOffer exch) $ Just lowestOffer'
+        Just bestOffer'' -> 
+          when (lowestOffer' < bestOffer'') $
+            writeTVar (view bestOffer exch) $ Just lowestOffer'
+
+declareLensesWith unprefixedFields [d|
+  data Transaction = Transaction
+    { buyerId :: Id
+    , sellerId :: Id
+    , quantity :: Integer
+    , price :: Price
+    }
+  |]
+
+resolve :: Exchange -> STM [Transaction]
+resolve exch = do
+  undefined
+  -- bestBid' <- readTVar $ view bestBid exch
+  -- bestOffer' <- readTVar $ view bestOffer exch
+  -- let
+  --   book'
+  --     = view book exch
+  -- if bestBid' == bestOffer'
+  --   then do
+  --     quotes <- Map.lookup bestBid' book'
+  --     undefined
+  --   else
+  --     return []
