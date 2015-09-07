@@ -92,6 +92,13 @@ declareLensesWith unprefixedFields [d|
     }
   |]
 
+newExchange :: STM Exchange
+newExchange
+  = Exchange
+      <$> Map.new
+      <*> STM.newTVar Nothing
+      <*> STM.newTVar Nothing
+
 type ExchangeOp m r = ReaderT Exchange m r
 
 -- | Install 'Bid's into the book. __Note__: you should always
