@@ -7,21 +7,17 @@ author:              Alex Bates
 maintainer:          ard.bates@gmail.com
 copyright:           2015 Alex Bates
 build-type:          Simple
--- extra-source-files:
 cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
   exposed-modules:
       ExchangeSim.Book
-  other-modules:
-      ExchangeSim.TH_Utils
   build-depends:       
       base >= 4.7 && < 5
     , stm-containers == 0.2.*
     , focus == 0.1.*
     , stm == 2.4.*
-    , lens == 4.*
     , time == 1.5.*
     , template-haskell == 2.10.*
     , containers == 0.5.*
