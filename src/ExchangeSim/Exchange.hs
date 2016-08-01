@@ -7,7 +7,9 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ViewPatterns #-}
 
-module Exchange where
+module ExchangeSim.Exchange where
+
+import ExchangeSim.TH_Utils
 
 import STMContainers.Map (Map)
 import qualified STMContainers.Map as Map
@@ -16,7 +18,6 @@ import Control.Concurrent.STM (STM, TVar)
 import qualified Control.Concurrent.STM as STM
 import Control.Lens
 import Data.Time
-import TH_Utils
 import Control.Monad
 import Data.Maybe
 import Data.Set (Set)

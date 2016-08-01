@@ -12,9 +12,10 @@ cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  exposed-modules:     Exchange
+  exposed-modules:
+      ExchangeSim.Exchange
   other-modules:
-      TH_Utils
+      ExchangeSim.TH_Utils
   build-depends:       
       base >= 4.7 && < 5
     , stm-containers == 0.2.*

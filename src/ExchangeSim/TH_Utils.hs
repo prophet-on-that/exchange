@@ -1,4 +1,4 @@
-module TH_Utils
+module ExchangeSim.TH_Utils
   ( unprefixedFields
   ) where
 
