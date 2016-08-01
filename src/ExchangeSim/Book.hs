@@ -7,7 +7,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ViewPatterns #-}
 
-module ExchangeSim.Exchange where
+module ExchangeSim.Book where
 
 import ExchangeSim.TH_Utils
 
@@ -89,23 +89,23 @@ emptyQuotes
 
 declareLensesWith unprefixedFields [d|
   -- | Pre: bestBid <= bestOffer.
-  data Exchange = Exchange
+  data Book = Book
     { book :: Map Price Quotes
     , bestBid :: TVar (Maybe Price) -- ^ The best bid is derived from the book, we store it here to avoid needless recomputation.
     , bestOffer :: TVar (Maybe Price) -- ^ The best offer is derived from the book, we store it here to avoid needless recomputation.
     }
   |]
 
-newExchange :: STM Exchange
-newExchange
-  = Exchange
+newBook :: STM Book
+newBook
+  = Book
       <$> Map.new
       <*> STM.newTVar Nothing
       <*> STM.newTVar Nothing
 
-newtype ExchangeOp a = ExchangeOp
-  { exchangeOp :: ReaderT Exchange STM a
-  } deriving (Functor, Applicative, Monad, MonadReader Exchange, MonadBase STM, MonadThrow, MonadCatch)
+newtype BookOp a = BookOp
+  { exchangeOp :: ReaderT Book STM a
+  } deriving (Functor, Applicative, Monad, MonadReader Book, MonadBase STM, MonadThrow, MonadCatch)
 
 declareLensesWith unprefixedFields [d|
   data Transaction = Transaction
@@ -116,17 +116,17 @@ declareLensesWith unprefixedFields [d|
     } deriving (Show)
   |]
 
-data ExchangeException
+data BookException
   = InconsistentState T.Text
   deriving (Show, Typeable)
 
-instance Exception ExchangeException
+instance Exception BookException
 
-runExchangeOp :: Exchange -> ExchangeOp () -> STM [Transaction]
-runExchangeOp exch op
+runBookOp :: Book -> BookOp () -> STM [Transaction]
+runBookOp exch op
   = runReaderT (exchangeOp $ op >> resolve) exch
   where
-    resolve :: ExchangeOp [Transaction]
+    resolve :: BookOp [Transaction]
     resolve = do
       bestBid' <- view bestBid >>= readTVar
       bestOffer' <- view bestOffer >>= readTVar
@@ -254,7 +254,7 @@ runExchangeOp exch op
 -- | Install a Bid into the book. 
 addBid
   :: Bid
-  -> ExchangeOp ()
+  -> BookOp ()
 addBid bid = do
   bestOffer' <- view bestOffer >>= readTVar
   let
@@ -286,7 +286,7 @@ addBid bid = do
 -- | Install an 'Offer' into the book. 
 addOffer
   :: Offer
-  -> ExchangeOp ()
+  -> BookOp ()
 addOffer offer = do
   bestBid' <- view bestBid >>= readTVar
   let 
