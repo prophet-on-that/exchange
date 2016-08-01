@@ -4,6 +4,8 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Exchange where
 
@@ -16,7 +18,6 @@ import Control.Lens
 import Data.Time
 import TH_Utils
 import Control.Monad
-import Data.Foldable
 import Data.Maybe
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -27,6 +28,7 @@ import qualified Data.Text as T
 import Data.Typeable
 import Control.Monad.Reader
 import Control.Monad.Base
+import qualified ListT
 
 -- STM primitives --
 
@@ -52,7 +54,7 @@ declareLensesWith unprefixedFields [d|
     , quantity :: !Integer
     , maximumPrice :: !Price
     , timestamp :: {-# UNPACK #-} !UTCTime
-    } deriving (Eq)
+    } deriving (Eq, Show)
   |]
 
 instance Ord Bid where
@@ -66,7 +68,7 @@ declareLensesWith unprefixedFields [d|
     , quantity :: !Integer
     , minimumPrice :: !Price
     , timestamp :: {-# UNPACK #-} !UTCTime
-    } deriving (Eq)
+    } deriving (Eq, Show)
   |]
 
 instance Ord Offer where
@@ -85,6 +87,7 @@ emptyQuotes
   = Quotes Set.empty Set.empty
 
 declareLensesWith unprefixedFields [d|
+  -- | Pre: bestBid <= bestOffer.
   data Exchange = Exchange
     { book :: Map Price Quotes
     , bestBid :: TVar (Maybe Price) -- ^ The best bid is derived from the book, we store it here to avoid needless recomputation.
@@ -99,101 +102,9 @@ newExchange
       <*> STM.newTVar Nothing
       <*> STM.newTVar Nothing
 
-type ExchangeOp m r = ReaderT Exchange m r
-
--- | Install 'Bid's into the book. __Note__: you should always
--- 'resolve' before executing the STM action after using this
--- function.
-addBids
-  :: [Bid]
-  -> ExchangeOp STM ()
-addBids bids' = do
-  bestOffer' <- view bestOffer >>= readTVar
-  let
-    updateMap :: Maybe Price -> Bid -> ExchangeOp STM (Maybe Price)
-    updateMap highestBid bid = do
-      let
-        bidPrice
-          = case bestOffer' of
-              Nothing ->
-                view maximumPrice bid
-              Just bestOffer'' ->
-                min (view maximumPrice bid) bestOffer''
-            
-        alter :: Maybe Quotes -> STM (Maybe Quotes)
-        alter
-          = return . Just . modQuotes . fromMaybe emptyQuotes
-          where
-            modQuotes
-              = bids %~ Set.insert bid
-
-      book' <- view book
-      liftBase $ Map.focus (Focus.alterM alter) bidPrice book'
-      return $ max (Just bidPrice) highestBid
-      
-  highestBid <- foldlM updateMap Nothing bids'
-
-  -- Update stored best bid.
-  case highestBid of
-    Nothing ->
-      return ()
-    Just highestBid' -> do
-      bestBid' <- view bestBid >>= readTVar
-      case bestBid' of
-        Nothing ->
-          view bestBid >>= flip writeTVar (Just highestBid')
-        Just bestBid'' -> 
-          when (highestBid' > bestBid'') $
-            view bestBid >>= flip writeTVar (Just highestBid')
-
--- | Install 'Offer's into the book. __Note__: you should always
--- 'resolve' before executing the STM action after using this
--- function.
-addOffers
-  :: [Offer]
-  -> ExchangeOp STM ()
-addOffers offers' = do
-  bestBid' <- view bestBid >>= readTVar
-  let
-    updateMap :: Maybe Price -> Offer -> ExchangeOp STM (Maybe Price)
-    updateMap lowestOffer offer = do
-      let
-        offerPrice
-          = case bestBid' of
-              Nothing ->
-                view minimumPrice offer
-              Just bestBid'' -> 
-                max (view minimumPrice offer) bestBid''
-            
-        alter :: Maybe Quotes -> STM (Maybe Quotes)
-        alter 
-          = return . Just . modQuotes . fromMaybe emptyQuotes
-          where
-            modQuotes
-              = offers %~ Set.insert offer
-
-      book' <- view book
-      liftBase $ Map.focus (Focus.alterM alter) offerPrice book'
-      case lowestOffer of
-        Nothing ->
-          return $ Just offerPrice
-        (Just lowestOffer') ->
-          return . Just $ min offerPrice lowestOffer'
-      
-  lowestOffer <- foldlM updateMap Nothing offers'
-
-  -- Update stored best offer.
-  case lowestOffer of
-    Nothing ->
-      return ()
-    Just lowestOffer' -> do
-      bestOffer' <- view bestOffer >>= readTVar
-      case bestOffer' of
-        Nothing ->
-          view bestOffer >>= flip writeTVar (Just lowestOffer')
-        Just bestOffer'' -> 
-          when (lowestOffer' < bestOffer'') $
-            view bestOffer >>= flip writeTVar (Just lowestOffer')
+newtype ExchangeOp a = ExchangeOp
+  { exchangeOp :: ReaderT Exchange STM a
+  } deriving (Functor, Applicative, Monad, MonadReader Exchange, MonadBase STM, MonadThrow, MonadCatch)
 
 declareLensesWith unprefixedFields [d|
   data Transaction = Transaction
@@ -201,7 +112,7 @@ declareLensesWith unprefixedFields [d|
     , sellerRef :: Id
     , quantity :: Integer
     , price :: Price
-    }
+    } deriving (Show)
   |]
 
 data ExchangeException
@@ -210,100 +121,196 @@ data ExchangeException
 
 instance Exception ExchangeException
 
-resolve :: ExchangeOp STM [Transaction]
-resolve = do
-  bestBid' <- view bestBid >>= readTVar
+runExchangeOp :: Exchange -> ExchangeOp () -> STM [Transaction]
+runExchangeOp exch op
+  = runReaderT (exchangeOp $ op >> resolve) exch
+  where
+    resolve :: ExchangeOp [Transaction]
+    resolve = do
+      bestBid' <- view bestBid >>= readTVar
+      bestOffer' <- view bestOffer >>= readTVar
+      let
+        tradePrice = do
+          bestBid'' <- bestBid'
+          bestOffer'' <- bestOffer'
+          guard $ bestBid'' == bestOffer''
+          return bestBid''
+            
+      case tradePrice of
+        Nothing ->
+          return []
+        Just tradePrice' -> do
+          quotes <- view book >>= liftBase . Map.focus lookupAndDelete tradePrice'
+          case quotes of
+            Nothing ->
+              throwM $ InconsistentState "resolve: book lookup at tradePrice yielded Nothing"
+            Just quotes' -> do
+              let
+                bids'
+                  = sortBy (comparing $ view timestamp) . Set.toList . view bids $ quotes'
+                offers'
+                  = sortBy (comparing $ view timestamp) . Set.toList . view offers $ quotes'
+                (transactions, remainingBids, remainingOffers)
+                  = resolve' tradePrice' bids' offers'
+
+              -- Recompute best bid.
+              when (null remainingBids) $ do
+                let
+                  helper price' (price, view bids -> bids')
+                    | Set.size bids' > 0
+                        = case price' of
+                            Nothing ->
+                              return $ Just price
+                            Just price'' ->
+                              return . Just $ max price'' price
+                    | otherwise
+                        = return price'
+                bestBid' <- view book >>= liftBase . ListT.fold helper Nothing . Map.stream
+                view bestBid >>= flip writeTVar bestBid'
+
+              -- Recompute best offer.
+              when (null remainingOffers) $ do
+                let
+                  helper price' (price, view offers -> offers')
+                    | Set.size offers' > 0
+                        = case price' of
+                            Nothing ->
+                              return $ Just price
+                            Just price'' ->
+                              return . Just $ min price'' price
+                    | otherwise
+                        = return price'
+                bestOffer' <- view book >>= liftBase . ListT.fold helper Nothing . Map.stream
+                view bestOffer >>= flip writeTVar bestOffer'
+                
+              case (remainingBids, remainingOffers) of
+                ([], []) ->
+                  return transactions
+                  
+                (remainingBids', []) -> do
+                  mapM_ addBid remainingBids' 
+                  transactions' <- resolve 
+                  return $ transactions ++ transactions'
+                  
+                ([], remainingOffers') -> do
+                  mapM_ addOffer remainingOffers' 
+                  transactions' <- resolve 
+                  return $ transactions ++ transactions'
+    
+                _ ->
+                  throwM $ InconsistentState "resolve: bids and offers both non-exhausted"
+      where
+        lookupAndDelete :: Focus.StrategyM STM Quotes (Maybe Quotes)
+        lookupAndDelete Nothing
+          = return $ (Nothing, Focus.Keep)
+        lookupAndDelete (Just quotes)
+          = return $ (Just quotes, Focus.Remove)
+        
+        -- Post: null bids || null offers
+        resolve' :: Price -> [Bid] -> [Offer] -> ([Transaction], [Bid], [Offer])
+        resolve' tradePrice
+          = helper []
+          where
+            helper :: [Transaction] -> [Bid] -> [Offer] -> ([Transaction], [Bid], [Offer])
+            helper transactions (bid : bids') (offer : offers')
+              | bidQuantity == offerQuantity
+                  = let
+                      newTransaction
+                        = Transaction buyerRef' sellerRef' bidQuantity tradePrice
+                    in
+                      helper (newTransaction : transactions) bids' offers'
+              | bidQuantity > offerQuantity
+                  = let
+                      newTransaction
+                        = Transaction buyerRef' sellerRef' offerQuantity tradePrice
+                      updatedBid
+                        = bid
+                            & ( quantity -~ offerQuantity )
+                    in
+                      helper (newTransaction : transactions) (updatedBid : bids') offers'
+              | otherwise 
+                  = let
+                      newTransaction
+                        = Transaction buyerRef' sellerRef' bidQuantity tradePrice
+                      updatedOffer
+                        = offer
+                            & ( quantity -~ bidQuantity )
+                    in
+                      helper (newTransaction : transactions) bids' (updatedOffer : offers')
+              where
+                bidQuantity
+                  = view quantity bid
+                offerQuantity
+                  = view quantity offer
+                buyerRef'
+                  = view clientRef bid
+                sellerRef'
+                  = view clientRef offer
+    
+            helper transactions bids' offers'
+              = (transactions, bids', offers')
+                
+-- | Install a Bid into the book. 
+addBid
+  :: Bid
+  -> ExchangeOp ()
+addBid bid = do
   bestOffer' <- view bestOffer >>= readTVar
   let
-    tradePrice = do
-      bestBid'' <- bestBid'
-      bestOffer'' <- bestOffer'
-      guard $ bestBid'' == bestOffer''
-      return bestBid''
-        
-  case tradePrice of
-    Nothing ->
-      return []
-    Just tradePrice' -> do
-      quotes <- view book >>= liftBase . Map.focus lookupAndDelete tradePrice'
-      case quotes of
-        Nothing ->
-          throwM $ InconsistentState "resolve: book lookup at tradePrice yielded Nothing"
-        Just quotes' -> do
-          let
-            bids'
-              = sortBy (comparing $ Down . view timestamp) . Set.toList . view bids $ quotes'
-            offers'
-              = sortBy (comparing $ Down . view timestamp) . Set.toList . view offers $ quotes'
-            (transactions, remainingBids, remainingOffers)
-              = resolve' tradePrice' bids' offers'
-          case (remainingBids, remainingOffers) of
-            ([], []) ->
-              return transactions
-              
-            (remainingBids', []) -> do
-              addBids remainingBids' 
-              transactions' <- resolve 
-              return $ transactions ++ transactions'
-              
-            ([], remainingOffers') -> do
-              addOffers remainingOffers' 
-              transactions' <- resolve 
-              return $ transactions ++ transactions'
-
-            _ ->
-              throwM $ InconsistentState "resolve: bids and offers both non-exhausted"
-  where
-    lookupAndDelete :: Focus.StrategyM STM Quotes (Maybe Quotes)
-    lookupAndDelete Nothing
-      = return $ (Nothing, Focus.Keep)
-    lookupAndDelete (Just quotes)
-      = return $ (Just quotes, Focus.Remove)
-    
-    -- Post: null bids || null offers
-    resolve' :: Price -> [Bid] -> [Offer] -> ([Transaction], [Bid], [Offer])
-    resolve' tradePrice bids' offers' 
-      = (reverse transactions, remainingBids, remainingOffers)
+    bidPrice
+      = case bestOffer' of
+          Nothing ->
+            view maximumPrice bid
+          Just bestOffer'' ->
+            min (view maximumPrice bid) bestOffer''
+            
+    alter :: Maybe Quotes -> STM (Maybe Quotes)
+    alter
+      = return . Just . modQuotes . fromMaybe emptyQuotes
       where
-        (transactions, remainingBids, remainingOffers)
-          = helper [] bids' offers'
-            
-        helper :: [Transaction] -> [Bid] -> [Offer] -> ([Transaction], [Bid], [Offer])
-        helper transactions (bid : bids') (offer : offers')
-          | bidQuantity == offerQuantity
-              = let
-                  newTransaction
-                    = Transaction buyerRef' sellerRef' bidQuantity tradePrice
-                in
-                  (newTransaction : transactions, bids', offers')
-          | bidQuantity > offerQuantity
-              = let
-                  newTransaction
-                    = Transaction buyerRef' sellerRef' offerQuantity tradePrice
-                  updatedBid
-                    = bid
-                        & ( quantity -~ offerQuantity )
-                in
-                  (newTransaction : transactions, updatedBid : bids', offers')
-          | otherwise 
-              = let
-                  newTransaction
-                    = Transaction buyerRef' sellerRef' bidQuantity tradePrice
-                  updatedOffer
-                    = offer
-                        & ( quantity -~ bidQuantity )
-                in
-                  (newTransaction : transactions, bids', updatedOffer : offers')
-          where
-            bidQuantity
-              = view quantity bid
-            offerQuantity
-              = view quantity offer
-            buyerRef'
-              = view clientRef bid
-            sellerRef'
-              = view clientRef offer
+        modQuotes
+          = bids %~ Set.insert bid
 
-        helper transactions bids' offers'
-          = (transactions, bids', offers')
-            
+  book' <- view book
+  liftBase $ Map.focus (Focus.alterM alter) bidPrice book'
+
+  -- Update stored best bid.
+  bestBid' <- view bestBid >>= readTVar
+  case bestBid' of
+    Nothing ->
+      view bestBid >>= flip writeTVar (Just bidPrice)
+    Just bestBid'' ->
+      view bestBid >>= flip writeTVar (Just $ max bidPrice bestBid'')
+
+-- | Install an 'Offer' into the book. 
+addOffer
+  :: Offer
+  -> ExchangeOp ()
+addOffer offer = do
+  bestBid' <- view bestBid >>= readTVar
+  let 
+    offerPrice
+      = case bestBid' of
+          Nothing ->
+            view minimumPrice offer
+          Just bestBid'' -> 
+            max (view minimumPrice offer) bestBid''
+        
+    alter :: Maybe Quotes -> STM (Maybe Quotes)
+    alter 
+      = return . Just . modQuotes . fromMaybe emptyQuotes
+      where
+        modQuotes
+          = offers %~ Set.insert offer
+
+  book' <- view book
+  liftBase $ Map.focus (Focus.alterM alter) offerPrice book'
+
+  -- Update stored best offer.
+  bestOffer' <- view bestOffer >>= readTVar
+  case bestOffer' of
+    Nothing ->
+      view bestOffer >>= flip writeTVar (Just offerPrice)
+    Just bestOffer'' -> 
+      view bestOffer >>= flip writeTVar (Just $ min offerPrice bestOffer'')
+
